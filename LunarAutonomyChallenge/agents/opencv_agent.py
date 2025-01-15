@@ -1,5 +1,9 @@
 #!/usr/bin/env python
 
+# THIS AGENT CURRENTLY RUNS FASTSAM AND EXTRACTS BOULDER POSITIONS USING STEREO IMAGES FROM FRONT CAMERA
+# IT RUNS WITH USER INPUTS USING ARROW KEYS
+# IT SAVES DATA TO A "SELF.TRIAL" NUMBER THAT YOU HAVE TO SET
+
 # This work is licensed under the terms of the MIT license.
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
@@ -25,7 +29,8 @@ from src.utils import plotErrorEllipse
 import skimage
 from src.FastSAM.fastsam import *
 from src.FastSamWrapper import FastSamWrapper
-
+from src.stereoMapper import IPExStereoDepthMapper
+import json
 
 """ Import the AutonomousAgent from the Leaderboard. """
 
@@ -64,10 +69,17 @@ class OpenCVagent(AutonomousAgent):
         self.columns = ['frame', 'power', 'input_v', 'input_w', 'gt_x', 'gt_y', 'gt_z', 'gt_roll', 'gt_pitch', 'gt_yaw', 'imu_accel_x', 'imu_accel_y', 'imu_accel_z', 'imu_gyro_x', 'imu_gyro_y', 'imu_gyro_z']
         self.imu = []
 
-        self.trial = '005'
+        # set the trial number here
+        self.trial = '006'
 
-        # FastSAM setup
+        if not os.path.exists(f'./data/{self.trial}'):
+                os.makedirs(f'./data/{self.trial}')
+
+        self.checkpoint_path = f'./data/{self.trial}/boulders_frame{self.frame}.json'
+
+        # FastSAM and stereo mapping class setups
         self.FastSamModel = FastSamWrapper('./dependencies/FastSAM/Models/FastSAM-x.pt', 'cuda', 0.5, 0.9)
+        self.stereoMapper = IPExStereoDepthMapper()
 
 
     def use_fiducials(self):
@@ -131,32 +143,21 @@ class OpenCVagent(AutonomousAgent):
         sensor_data_front = input_data['Grayscale'][carla.SensorPosition.Front]
         sensor_data_back = input_data['Grayscale'][carla.SensorPosition.Back]
 
-        # segment_masks = self.FastSamModel.segmentFrame(sensor_data_frontleft)
-        # if (segment_masks is not None):
-        #     print("len segment masks", len(segment_masks))
-        # else:
-        #     print("no segments found")
 
-        if (sensor_data_frontleft is not None and self.frame%7==0):
+        # This runs the FastSAM pipeline every 25 frames
+        if (sensor_data_frontleft is not None and self.frame%25==0):
             # running our fastSAM stuff here
             image_gray_rgb = np.stack((sensor_data_frontleft,)*3, axis=-1)
             segment_masks = self.FastSamModel.segmentFrame(image_gray_rgb)
 
-            print("sensor_data_frontleft shape", sensor_data_frontleft.shape)
-
-            
-
-            print("image_gray_rgb shape", image_gray_rgb.shape)
-
+            # initialize arrays to keep the blob/segment means (in pixels) and covs (basically size ellipses)
             blob_means = []
             blob_covs = []
 
-            # If there were segmentations detected by FastSAM, transfer them from GPU to CPU and convert to Numpy arrays
-            # if (len(segment_masks) == 0):
-            #     print("no segments returned")
-            #     segment_masks = None
-            fig, ax = plt.subplots(figsize=(8, 6))  # Define the figure and axis
+            # defining a figure for plotting later
+            fig, ax = plt.subplots(figsize=(8, 6))
 
+            # TODO: add pruning to get rid of boulders that are huge, touch borders, etc.
             if (segment_masks is not None):
                 print("number of segment masks returned: ", len(segment_masks))
                 # FastSAM provides a numMask-channel image in shape C, H, W where each channel in the image is a binary mask
@@ -170,10 +171,10 @@ class OpenCVagent(AutonomousAgent):
 
                 for maskId in range(numMasks):
                     # Extract the single binary mask for this mask id
-                    # print("masking id", maskId)
                     mask_this_id = segment_masks[maskId,:,:]
 
                     # From the pixel coordinates of the mask, compute centroid and a covariance matrix
+                    # using helper function defined in utils (imported at top of this code)
                     blob_mean, blob_cov = compute_blob_mean_and_covariance(mask_this_id)
                     
                     # Store centroids and covariances in lists
@@ -183,56 +184,37 @@ class OpenCVagent(AutonomousAgent):
                     # Replace the 1s corresponding with masked areas with maskId (i.e. number of mask)
                     segment_masks_flat = np.where(mask_this_id < 1, segment_masks_flat, maskId)
 
-                # Using skimage, overlay masked images with colors
-                print("overlaying images")
-                print("segmasks flat shape", segment_masks_flat.shape)
-                print("image gray rgb shape", image_gray_rgb.shape)
-                # image_gray_rgb = skimage.color.label2rgb(segment_masks_flat, image_gray_rgb)
-                # Overlay masked images with colors
+                # overlay segments on image
                 image_gray_rgb = skimage.color.label2rgb(segment_masks_flat, image_gray_rgb)
-                ax.imshow(image_gray_rgb)  # Display the image with overlaid masks
+                ax.imshow(image_gray_rgb)  # Display the image with overlaid masks (for saving, won't actually plot)
 
             # For each centroid and covariance, plot an ellipse
             for m, c in zip(blob_means, blob_covs):
-                print("plotting error elipse at", m[0], m[1], c)
                 plotErrorEllipse(ax, m[0], m[1], c, "r",stdMultiplier=2.0)
 
-            # Show image using Matplotlib, set axis limits, save and close the output figure.
-            # ax.imshow(image_gray_rgb)
             # Display the overlaid image on the Matplotlib axis
             ax.imshow(image_gray_rgb)
             ax.axis('off')  # Remove axis for a cleaner saved image
 
-            # Save the Matplotlib figure as an image
-            output_path = f'data/{self.trial}/FastSAM/{self.frame}_fastsam_means_covs.png'
-            plt.savefig(output_path, bbox_inches='tight', pad_inches=0, dpi=300)
+            # Save the Matplotlib figure  with means and covs plotted on top as an image
+            output_path = os.path.join('data', self.trial, 'FastSAM')
+            os.makedirs(output_path, exist_ok=True)
+            plt.savefig(os.path.join(output_path, f'{self.frame}_fastsam_means_covs.png'), bbox_inches='tight', pad_inches=0, dpi=300)
             print(f"Saved plot as {output_path}")
 
-            print("trying to save image")
             # Normalize and convert to uint8
             image_to_save = (image_gray_rgb * 255).astype(np.uint8)
 
             # Save the image
             cv.imwrite(f'data/{self.trial}/FastSAM/' + str(self.frame) + '_fastsam.png', cv.cvtColor(image_to_save, cv.COLOR_RGB2BGR))
 
-
-            # cv.imwrite(f'data/{self.trial}/FastSAM/' + str(self.frame) + '_fastsam.png', image_gray_rgb)
-        # ax.set_xlim([0,w])
-        # ax.set_ylim([h,0])
-        # fig.savefig(filepath_out, bbox_inches='tight', pad_inches=0)
-        # plt.close(fig)
-
-
-
-
+        # This part is gathering info to be used later
         imu_data = self.get_imu_data()
         mission_time = round(self.get_mission_time(), 2)
         vehicle_data=self._vehicle_status
         transform = vehicle_data.transform
         # current_power = self._controller.agent.get_current_power()
         # power_percent = self._controller.agent.get_current_power() / self._max_power*100.
-        print("imu data: ", imu_data)
-
         transform_location_x = transform.location.x
         transform_location_y = transform.location.y
         transform_location_z = transform.location.z
@@ -243,17 +225,18 @@ class OpenCVagent(AutonomousAgent):
         input_w = self.current_w
         power = self.get_current_power()
 
-        # self.imu.append([self.frame] + [transform.location.x, transform.location.y, transform.location.z] + imu_data)
+        # adding a bunch of info to save to a csv at the end
         imu_entry = [self.frame] + \
             [power, input_v, input_w, transform_location_x, transform_location_y, transform_location_z, transform_rotation_r, transform_rotation_p, transform_rotation_y] + \
             imu_data.tolist()  # Convert NumPy array to list
 
-        # Append to self.imu
+        # Append to self.imu list to save at the end
         self.imu.append(imu_entry)
 
         """ We need to check that the sensor data is not None before we do anything with it. The date for each camera will be 
         None for every other simulation step, since the cameras operate at 10Hz while the simulator operates at 20Hz. """
 
+        # TODO: This is a bunch of repeat code (sorry) for saving all the images - need to make this a function or streamline it
         if sensor_data_frontleft is not None:
 
             cv.imshow('Left camera view', sensor_data_frontleft)
@@ -263,6 +246,7 @@ class OpenCVagent(AutonomousAgent):
             if not os.path.exists(dir_frontleft):
                 os.makedirs(dir_frontleft)
 
+            # saving the semantic images and regular images
             semantic = input_data['Semantic'][carla.SensorPosition.FrontLeft]
             cv.imwrite(dir_frontleft + str(self.frame) + '_sem.png', semantic)
 
@@ -282,6 +266,48 @@ class OpenCVagent(AutonomousAgent):
             cv.imwrite(dir_frontright + str(self.frame) + '.png', sensor_data_frontright)
             print("saved image front right ", self.frame)
 
+        # here comes the fun part! We're done with our first two images so now we're going to extract depth from them and
+        # also get the boulder locations in the camera frame - this happens every 25 frames (the rate FastSAM is running)
+        if (sensor_data_frontleft is not None and sensor_data_frontright is not None and self.frame%25==0):
+            # assigning stereo image names to keep track of more easily
+            left_img = sensor_data_frontleft
+            right_img = sensor_data_frontright
+            
+            # Compute depth map and confidence using class defined in src code
+            depth_map, confidence_map = self.stereoMapper.compute_depth_map(left_img, right_img)
+            
+            # Get 3D point cloud
+            points = self.stereoMapper.get_3d_point_cloud(depth_map)
+            
+            # Visualize depth map - uncomment this if you want to see the stereo maps every time
+            print("calculating depth")
+            # TODO: smooth depth maps or find a better way to handle null areas
+            normalized_depth = cv.normalize(depth_map, None, 0, 255, cv.NORM_MINMAX, cv.CV_8U)
+            # cv.imshow('Depth Map', normalized_depth)
+            # cv.imshow('Confidence Map', (confidence_map * 255).astype(np.uint8))
+            # cv.waitKey(1)
+            # cv2.destroyAllWindows()
+
+            # calculate positions [x y z] and depths (distance from camera - nice for sanity check) of each segment
+            boulder_positions, boulder_depths = self.stereoMapper.get_object_positions(depth_map, blob_means)
+
+            for i, (position, depth) in enumerate(zip(boulder_positions, boulder_depths)):
+                if position is not None:
+                    print(f"Object {i}:")
+                    print(f"  Position in robot frame: X={position[0]:.2f}, Y={position[1]:.2f}, Z={position[2]:.2f} meters")
+                    print(f"  Distance from camera: {depth:.2f} meters")
+                else:
+                    print(f"Object {i}: No valid depth found")
+
+            # Save keyframe data
+            self.stereoMapper.save_keyframe(self.frame, boulder_positions)
+            
+        # Periodically save checkpoint (e.g., every 51 frames)
+        # TODO: fix weird odd number saving - where is this coming from? currently set to 51 as workaround...
+        if self.frame % 51 == 0:
+            self.stereoMapper.save_checkpoint(self.checkpoint_path)
+
+        # Back to repeat code of just saving images and semantic images from everything else: 
         if sensor_data_left is not None:
 
             dir_left = f'data/{self.trial}/Left/'
@@ -360,12 +386,11 @@ class OpenCVagent(AutonomousAgent):
             cv.imwrite(dir_back + str(self.frame) + '.png', sensor_data_back)
             print("saved image back ", self.frame)
 
-
-
         """ Now we prepare the control instruction to return to the simulator, with our target linear and angular velocity. """
 
         self.frame += 1
 
+        # TODO: navigation stuff will come in here!
         control = carla.VehicleVelocityControl(self.current_v, self.current_w)
         
         """ If the simulation has been going for more than 5000 frames, let's stop it. """
@@ -380,7 +405,7 @@ class OpenCVagent(AutonomousAgent):
         In this case, we should close the OpenCV window. """
 
         # Save the data to a CSV file
-        output_filename_imu = f"/home/annikat/LAC/LunarAutonomyChallenge/data/{self.trial}/imu_data.csv"
+        output_filename_imu = f"/home/annikat/LAC/MIT-MAPLE/LunarAutonomyChallenge/data/{self.trial}/imu_data.csv"
 
         # Write to CSV file
         with open(output_filename_imu, mode='w', newline='') as file:
