@@ -70,7 +70,7 @@ class OpenCVagent(AutonomousAgent):
         self.imu = []
 
         # set the trial number here
-        self.trial = '006'
+        self.trial = '007'
 
         if not os.path.exists(f'./data/{self.trial}'):
                 os.makedirs(f'./data/{self.trial}')
