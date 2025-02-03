@@ -25,3 +25,5 @@ Open the LunarAutonomyChallenge folder - to edit this, open this folder in a cod
 ```
 cd LunarAutonomyChallenge
 ```
+
+To test/develop, create a new agent in the "agents" folder and name it 'agent0XX.py'. To test your agent, make sure to update the RunLeaderboard.sh code to export the TEAM_AGENT as your agent's new name. 
